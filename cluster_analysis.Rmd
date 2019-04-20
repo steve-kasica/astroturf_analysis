@@ -1,0 +1,136 @@
+---
+title: "Cluster Analysis"
+author: "Steve Kasica"
+date: "April 16, 2019"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(shiny)
+library(DT)
+```
+
+```{r}
+seed <- 42
+n <- 1000
+```
+
+```{r, include=FALSE}
+data_dir <- file.path(getwd(), 'data', paste0(n, '_', seed))
+
+clusters <- list.files(data_dir)
+clusters <- clusters[grepl('^clusters_', clusters)]
+
+comments <- read.csv(file.path(data_dir, 'comments_sample.csv')) %>%
+  select(-dupe_count)
+
+comments <- lapply(clusters, function(fn) {
+  cl <- read.csv(file.path(data_dir, fn)) %>% select(docid, cluster)
+  key <- sub('clusters_(.*).csv', '\\1', fn)
+  colnames(cl) <- c('docid', key)
+  return(cl)
+}) %>% 
+  reduce(inner_join, by='docid') %>% inner_join(comments, by='docid') %>%
+  gather(key='cluster_method', value='cluster_id', -docid, -text_data)
+```
+
+```{r, echo=FALSE}
+shinyApp(
+
+  ui = fluidPage(
+    selectInput("region", "Region:",
+                choices = colnames(WorldPhones)),
+    plotOutput("phonePlot")
+  ),
+
+  server = function(input, output) {
+    output$phonePlot = renderPlot({
+      barplot(WorldPhones[,input$region]*1000,
+              ylab = "Number of Telephones", xlab = "Year")
+    })
+  },
+
+  options = list(height = 500)
+)
+```
+
+```{r, echo=FALSE}
+cluster_dashboard <- function(dataset) {
+    methods <- unique(dataset$cluster_method)
+    
+    shinyApp(
+        ui=
+        ),
+        server=function(input, output, session) {
+            # Combine the selected variables into a new data frame
+        
+            selectedData = reactive({
+                comments[comments$cluster_method==input$cl_method,]
+            })
+        
+        
+            # Plot barchart of comment counts by cluster ID
+            output$cluster_counts=renderPlot({
+                ggplot(selectedData(), aes(cluster_id)) + 
+                    geom_bar() +
+                    ggtitle(paste('Cluster Count', paste0('(', input$cl_method, ')')))
+            })
+         
+            # Plot paginated comment text table
+            #  output$txt_tbl=renderDT(comments_subset, options = list(lengthChange = FALSE)) 
+        }
+    )
+}
+```
+
+```{r}
+kmeans_cluster = function(dataset) {
+
+  library(shiny)  
+  vars = names(dataset)
+
+  shinyApp(
+    ui = fluidPage(
+      fluidRow(style = "padding-bottom: 20px;",
+        column(4, selectInput('xcol', 'X Variable', vars)),
+        column(4, selectInput('ycol', 'Y Variable', vars,
+                              selected = vars[2])),
+        column(4, numericInput('clusters', 'Cluster count', 3,
+                               min = 1, max = 9))
+      ),
+      fluidRow(
+        plotOutput('kmeans', height = "400px")  
+      )
+    ),
+
+    server = function(input, output, session) {
+
+      # Combine the selected variables into a new data frame
+      selectedData = reactive({
+        dataset[, c(input$xcol, input$ycol)]
+      })
+
+      clusters = reactive({
+        kmeans(selectedData(), input$clusters)
+      })
+
+      output$kmeans = renderPlot(height = 400, {
+        res = clusters()
+        par(mar = c(5.1, 4.1, 0, 1))
+        plot(selectedData(),
+             col = res$cluster, pch = 20, cex = 3)
+        points(res$centers, pch = 4, cex = 4, lwd = 4)
+      })
+    },
+
+    options = list(height = 500)
+  )
+}
+
+```
+
+## TK

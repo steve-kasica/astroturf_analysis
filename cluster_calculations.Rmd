@@ -1,0 +1,228 @@
+---
+title: "Cluster Calculations"
+output: html_notebook
+---
+
+This R notebook contains all the code used to vectorize documents from the FCC-17-108 dataset as well as calculate cluster for each embedding. I follow [Google's R Style Guide](https://google.github.io/styleguide/Rguide.xml) in this notebook. This notebook is designed to be run in its entirety after modifying the variables `n`, which represents that sample size from Kao's manually tagged FCC-17-108 dataset, and `seed`, which is the random seed number. In the high-level project pipeline, this notebook is the first step. The next step is located in the Cluster Analysis notebook.
+
+## Set notebook parameters
+
+In order to run the same calculations with a different sample size or seed number, just modify the variables `seed` and `n` in the code chunk below.
+
+```{r}
+# Size to sample from Kao's manually tagged FCC-17-108 dataset.
+n <- 1000
+
+# Set the random seed
+seed <- 42
+```
+
+## Storing data
+
+This notebook stores all of its calculations in CSV files for further analysis. It will encapsulate these files in a directory named after the sample size, `n`, and the random seed, `seed`. 
+
+```{r}
+# Set the random seed for this notebook to make this analysis reproducable.
+set.seed(seed)
+
+# Create a directory to store all calculations as CSV files for further analysis.
+# Suppress warning message if directory already exists
+data.dir <- paste0('./data/', n, '_', seed)
+dir.create(file.path(data.dir), showWarnings=FALSE)  
+```
+
+## Load all necessary packages.
+
+This notebook uses tidytext to represent documents in R dataframe and the tidyverse for all wrangling tasks on those dataframe.
+
+```{r}
+library(tidytext)
+library(tidyverse)
+
+library(stringi)
+library(tokenizers)
+library(dbscan)
+library(Rtsne)
+library(udpipe)
+```
+
+## Sampling FCC-17-108
+
+Load Jeff Kao's FCC-17-108 dataset after manual tagging. 
+```{r}
+data_fn <- file.path(data.dir, 'comments_sample.csv')
+if (!file.exists(data_fn)) {
+    print("sample file does not exist. Sampling from Kao's dataset.")
+    comments <- read_csv('./data/proc_17_108_uniques_clustered_full.csv') %>%
+        sample_n(n) %>%
+        select(docid, text_data, dupe_count, level_0)
+    write_csv(comments, data_fn)
+} else {
+    print("sample file exist. Reading in file.")
+    comments <- read_csv(data_fn)
+}
+
+head(comments)
+```
+
+## Helper functions
+
+I've written a few helper functions to do the heavy lifting required by all vectorization methods. For example, the `calcNgramTbl` function is used on tidytext where `text_data` contains English words and in part-of-speech sequences of the same document. The method for calculating the document-ngram frequency matrix (DNM) was heavily influence by methods I learned in the book (Text Mining with R](https://www.tidytextmining.com). Also 
+```{r}
+calcNgramTbl <- function(df, n_min=NULL, n=2, measure='tf', threshold=0.05) {
+    # Calculates a document-ngram frequency matrix (DNM)
+    #
+    # Args:
+    #   df: One dataframe in tidytext format. This dataframe must have a column `docid` and `text_data`. 
+    #   n_min: The minimum ngram to calculate. This param is optional and defaults to the `n` argument's value
+    #   n: The number of ngrams to tokenize on, e.g. 2 for bigrams, 3 for trigrams, etc...
+    #   measure: the occurence measure, e.g. term frequency (tf), inverse document frequency (idf) or tf-idf
+    #   threshold: The minimum occurence value necessary for an ngram to be included in the DNM
+    #
+    # Returns:
+    #   A document-ngram frequency matrix (DNM) as a dataframe.
+    min <- if (!is.null(n_min)) n_min else n
+    
+    # Tokenize documents by ngram and separate each token into its own column (by position) 
+    col.pre <- 'position'
+    sep.cols <- sapply(1:n, function(i) paste0(col.pre, i))
+    DNM <- df %>% 
+        select(docid, text_data) %>% 
+        
+        # Tokenize text
+        unnest_tokens(gram, text_data, token='ngrams', n_min=min, n=n) %>%
+        
+        # Separate ngram into n additional columns
+        separate(gram, sep.cols, sep= ' ') %>%
+        
+        # if any term is a stopword, remove the row
+        filter_at(vars(starts_with(col.pre)), any_vars(!. %in% stop_words$word)) %>%
+        
+        # Return n additional columns to 1 column with the entire ngram
+        unite(gram, sep.cols, sep = ' ') %>%
+        
+        # Count occurance 
+        count(docid, gram) %>%
+        
+        # Compute tf, idf, and tf-idf
+        bind_tf_idf(gram, docid, n) %>%
+       
+        # Exclude all other measurement columns, e.g. tf, df, or tf-idf
+        select(docid, gram, measure) %>%
+        
+        # Remove values from column, such as tf, that are less than or 
+        # equal to a threshold
+        filter(measure > threshold) %>%
+        
+        # Rearrange columns into a document-ngram matrix 
+        spread(gram, measure) %>%
+        
+        # Replace NA values in this sparse matrix with zero
+        replace(., is.na(.), 0)
+        
+    return(DNM)
+}
+```
+
+Like many code chunks in this notebook, the `calcClusters` function also checks if this calculation has already been computed and saved on disk as a CSV file. 
+
+```{r}
+calcClusters <- function(df, model, minPts=5) {
+    # Calculates clusters in a document-ngram matrix and saves the results to disk.
+    # 
+    # Args:
+    #   X: the document-ngram matrix
+    #   docids: a vector of doc ides. The length of this vector must equal the number
+    #           of rows in X.
+    #   model: a string of the particular model on which the corpus was vecotrized.
+    #   minPts: the minimum number of points that counts as a cluster when running HDBSCAN.
+    #
+    # Returns:
+    #   A dataframe 
+    fn <- file.path(data.dir, paste0('clusters_', model, '.csv'))
+    docids <- df$docids
+    X <- df %>% select(-docid)
+    if (!file.exists(fn)) {
+        cl <- hdbscan(X, minPts=minPts)
+        point_data <- data.frame(
+            docid=docids,
+            cluster=cl$cluster,
+            membership_prob=cl$membership_prob,
+            outlier_scores=cl$outlier_scores)
+        write.csv(point_data, fn)
+    } else {
+        point_data <- read_csv(fn)
+    }
+    return(point_data)
+}
+```
+
+## Vectorize by term frequency
+
+The first approach will be to vectorize documents by term frequency from unigrams, bigrams, and trigrams. We'll also exclude any ngrams that have a term frequency of less than or equal to 0.05, which is the default parameter to `calcNgramTbl`. With a document-ngram matrix calculated for each of the three ngrams, let's run HDBSCAN on each matrix and store the results. Completing the code chunk below can take a while.
+
+```{r}
+word.tf <- lapply(1:3, function(i) {
+  calcNgramTbl(comments, n=i)
+})
+
+for (i in 1:3) {
+  calcClusters(word.tf, paste('word', i, 'tf', sep='_'))
+  print(paste('Finished iteration', i))
+}
+```
+
+## Vectorize by part of speech ngrams
+
+Part of speech (POS) sequence document are just like regular documents except that each word has been replaced by its part of speech, such as noun, adjective, verb. Part-of-speech tagging a corpus can take a while, so this cell chunk saves its results in the data file. The initial calculations can take a while to complete if the results aren't cached in a CSV file.
+```{r}
+seqs_fn <- file.path(data.dir, 'pos_seqs.csv')
+if (!file.exists(seqs_fn)) {
+  udmodel <- udpipe_download_model(language = 'english')
+  udmodel <- udpipe_load_model(file = udmodel$file_model)
+
+  comments_terms <- as.data.frame(udpipe_annotate(udmodel, comments$text_data, 
+                                      doc_id = comments$docid,
+                                      parser = 'none')) %>%
+    select(doc_id, paragraph_id, token_id, sentence_id, upos)
+
+  # Create a part-of-speech sequence for each document
+  pos_seqs <- summarize(group_by(comments_terms, doc_id), text_data = paste(upos, collapse = " "))
+  colnames(pos_seqs) <- c('docid', 'text_data')
+  # save this data for later
+  write_csv(pos_seqs, seqs_fn)
+} else {
+  # Hurray, this file exists and we don't have to run the POS tagger!
+  pos_seqs <- read_csv(seqs_fn)
+}
+head(pos_seqs)
+```
+
+### POS term frequency
+
+```{r}
+pos.tf <- lapply(1:5, function(i) {
+  fn <- file.path(data.dir, paste0('pos', i, '_tf.csv'))
+  if (!file.exists(fn)) {
+    df <- calcNgramTbl(pos_seqs, n=i)
+    write_csv(df, fn)
+  } else {
+    df <- read_csv(fn)
+  }
+  return(df)
+})
+
+for (i in 1:5) {
+  calcClusters(pos.tf[[i]], paste('pos', i, 'tf', sep='_'))
+  print(paste('Finished iteration', i))
+}
+```
+
+### The Daks & Clark approach
+
+Daks & Clark (2017) proposed an unsupervised approach for clustering documents by author based on syntactic structure. Their framework specifies a term document matrix comprised of 3, 4, and 5-grams in part-of-speech translated documents and weighted by TF-IDF. I'll also use the 0.05 threshold.
+
+```{r}
+dc_dtm <- calcNgramTbl(pos_seqs, n_min=3, n=5)
+calcClusters(dc_dtm, 'daks_clark')
+```

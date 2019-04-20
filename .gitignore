@@ -1,0 +1,6 @@
+data/*.csv
+.Rproj.user
+*.udpipe
+*.nb.html
+*.html
+*.bak
