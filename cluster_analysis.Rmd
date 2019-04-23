@@ -3,134 +3,182 @@ title: "Cluster Analysis"
 author: "Steve Kasica"
 date: "April 16, 2019"
 output: html_document
-runtime: shiny
+#runtime: shiny
 ---
+
+# Load notebook dependencies
+
+In this notebook, I use [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html) for data wrangling, [aricode](https://cran.r-project.org/web/packages/aricode/index.html) to compute the adjusted rand index between clusters.
 
 ```{r setup, include=FALSE}
 # knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
+library(aricode)
 library(shiny)
 library(DT)
+library(knitr)
+library(ggplot2)
+
+source('./util.R')
 ```
+
+# Set notebook variables
 
 ```{r}
 seed <- 42
 n <- 1000
 ```
 
+# Fetch cluster data
+
 ```{r, include=FALSE}
 data_dir <- file.path(getwd(), 'data', paste0(n, '_', seed))
-
-clusters <- list.files(data_dir)
-clusters <- clusters[grepl('^clusters_', clusters)]
-
-comments <- read.csv(file.path(data_dir, 'comments_sample.csv')) %>%
-  select(-dupe_count)
-
-comments <- lapply(clusters, function(fn) {
-  cl <- read.csv(file.path(data_dir, fn)) %>% select(docid, cluster)
-  key <- sub('clusters_(.*).csv', '\\1', fn)
-  colnames(cl) <- c('docid', key)
-  return(cl)
-}) %>% 
-  reduce(inner_join, by='docid') %>% inner_join(comments, by='docid') %>%
-  gather(key='cluster_method', value='cluster_id', -docid, -text_data)
+comments <- getClusterResults(data_dir)
 ```
 
-```{r, echo=FALSE}
-shinyApp(
-
-  ui = fluidPage(
-    selectInput("region", "Region:",
-                choices = colnames(WorldPhones)),
-    plotOutput("phonePlot")
-  ),
-
-  server = function(input, output) {
-    output$phonePlot = renderPlot({
-      barplot(WorldPhones[,input$region]*1000,
-              ylab = "Number of Telephones", xlab = "Year")
-    })
-  },
-
-  options = list(height = 500)
-)
-```
-
-```{r, echo=FALSE}
-cluster_dashboard <- function(dataset) {
-    methods <- unique(dataset$cluster_method)
+# Helper functions
+```{r}
+library(caret)
+calcRand <- function(comments, rexp=NULL) {
+    # Calculate adjusted Rand index
+    #
+    # Args:
+    #   comments: a tidytext dataframe to calculate clusters upon. It must include the 
+    #           method and is_astroturf columns
+    #   rexp: A regular expression to filter methods against (optional)
+    #
+    # Return:
+    #   Dataframe
+    if (!is.null(rexp)) {
+        comments <- comments %>% filter(str_detect(method, rexp))
+    }
     
-    shinyApp(
-        ui=
-        ),
-        server=function(input, output, session) {
-            # Combine the selected variables into a new data frame
-        
-            selectedData = reactive({
-                comments[comments$cluster_method==input$cl_method,]
-            })
-        
-        
-            # Plot barchart of comment counts by cluster ID
-            output$cluster_counts=renderPlot({
-                ggplot(selectedData(), aes(cluster_id)) + 
-                    geom_bar() +
-                    ggtitle(paste('Cluster Count', paste0('(', input$cl_method, ')')))
-            })
-         
-            # Plot paginated comment text table
-            #  output$txt_tbl=renderDT(comments_subset, options = list(lengthChange = FALSE)) 
-        }
-    )
+    #out <- data.frame(method=methods, rand=scores)
+    #rownames(out) <- NULL
+    
+    #out <- out %>% mutate(vec=ifelse(str_starts(method, 'pos|dak'), 'part of speech', 
+    #                ifelse(str_starts(method, 'word'), 'word', 
+    #                'misc')))
+    
+    return(scores)
 }
+
+```
+# Evaluating results
+
+We can get a sense of how the methods in this project faired against the manual tagging performed by Kao by calculating precision and recall. If we consider Kao's manually tagged comments as "ground truth" (although this term is inherently problematic) and this project's results as selected elements, than we can compute recall and precision to deterine how many selected comments were also tagged as astroturf and how many comments that were tagged as astroturf were selected.
+
+```{r}
+
+lvs <- c('normal', 'astrotruf')
+truth <- comments[comments$method=='level_0',]$is_astroturf
+levels(truth) <- lvs
+    
+methods <- as.character(unique(comments[comments$method!='level_0',]$method))
+confMatx <- lapply(methods, function(method) {
+    pred <- comments[comments$method==method,]$is_astroturf
+    levels(pred) <- lvs
+    xtab <- table(pred, truth)
+    out <- confusionMatrix(xtab)
+    # Print results
+    print(method)
+    print(out)
+    return(out)
+})
+
 ```
 
 ```{r}
-kmeans_cluster = function(dataset) {
-
-  library(shiny)  
-  vars = names(dataset)
-
-  shinyApp(
-    ui = fluidPage(
-      fluidRow(style = "padding-bottom: 20px;",
-        column(4, selectInput('xcol', 'X Variable', vars)),
-        column(4, selectInput('ycol', 'Y Variable', vars,
-                              selected = vars[2])),
-        column(4, numericInput('clusters', 'Cluster count', 3,
-                               min = 1, max = 9))
-      ),
-      fluidRow(
-        plotOutput('kmeans', height = "400px")  
-      )
-    ),
-
-    server = function(input, output, session) {
-
-      # Combine the selected variables into a new data frame
-      selectedData = reactive({
-        dataset[, c(input$xcol, input$ycol)]
-      })
-
-      clusters = reactive({
-        kmeans(selectedData(), input$clusters)
-      })
-
-      output$kmeans = renderPlot(height = 400, {
-        res = clusters()
-        par(mar = c(5.1, 4.1, 0, 1))
-        plot(selectedData(),
-             col = res$cluster, pch = 20, cex = 3)
-        points(res$centers, pch = 4, cex = 4, lwd = 4)
-      })
-    },
-
-    options = list(height = 500)
-  )
-}
-
+scores <- t(sapply(confMatx, function(s) {
+    c(s$byClass['Precision'], s$byClass['Recall'], s$byClass['F1'])
+}))
+scores <- data.frame(scores)
+scores <- cbind(scores, methods)
+scores <- data.frame(scores) %>% gather('metric', 'value', -methods)
+scores
 ```
 
-## TK
+```{r fig1, fig.width=10}
+ggplot(scores, aes(x=methods, y=value, fill=metric)) + 
+    geom_bar(position='dodge', stat='identity') + 
+    ggtitle('F1, Precision, and Recall by Vectorization Method')
+```
+
+
+# Qualitative analysis
+
+In order to facilitate qualitative analysis
+
+```{r}
+datatable(comments, filter='top')
+```
+
+## False negatives
+
+In this project, I consider a comment that was manually tagged as astroturf in Kao's analysis but not clustered using an authorial clustering approach to be a false negative. False positives can be viewed in the filterable table by setting `is_astroturf` is TRUE and `cluster_id` to 0, for whichever approach is specified in the `method` column.
+
+### Overview among all methods
+
+When examining the false positive results from part-of-speech trigrams, there were 299 comments picked up as duplicates by signature strings in Kao's method that were not clustered, and therefore not considered astroturf. Many comments were definitely part of a letter writing campaign, such as docid 1764196, which begins "Dear Express Restoring Internet Freedom." However, I would say the majority did not appear to be astroturf campaign. For example, docid 10492066, Beings "Instead of a pre-fabricated letter which will likely stagnate in redundancy, I wish to issue a personal statement of why I support net neutrality." However, in this cluster were many letter-writing campaign comments that being with "Dear Express Restoring Internet Freedom..."
+
+## False positives
+
+A false positive in this project is a comment that was not manually tagged as astroturf in Kao's analysis, but was clustered using an authorial clustering approach. When examining false positives from part-of-speech trigrams, there were 700 comments. 
+
+
+## Evaluation of POS Trigram's astroturf clusters.
+
+### ID 1
+
+ID number one appeared to be a letter writing campaign for net neutrality against
+
+> "I am in favor of strong net neutrality under Title II of the Telecommunications Act. Sincerely, Shelton Gomez"
+
+### ID 2 (344 entires)
+
+This is a madlib astroturf entry in favor of the proposal 
+
+> Chairman Pai: In reference to the future of the Internet. I'd like to advocate the commissioners to overturn President Obama's decision to regulate broadband. Individual Americans, rather than unelected bureaucrats, should be empowered to purchase the applications we prefer. President Obama's decision to regulate broadband is a corruption of the open Internet. It broke a pro-consumer policy that worked very successfully for many years with Republican and Democrat approval.
+
+> Dear Mr. Pai, My comments re: network neutrality regulations. I would like to recommend Ajit Pai to reverse The Obama/Wheeler decision to take over the web. People like me, as opposed to Washington bureaucrats, should be empowered to buy which applications they desire. The Obama/Wheeler decision to take over the web is a distortion of net neutrality. It ended a hands-off system that functioned exceptionally smoothly for decades with Republican and Democrat backing.	
+
+### ID 3 (6 entires)
+
+This represents the Etsy campaign. Strangely, a lot of these ended up being unclustered
+
+> Chairman Paiâ€™s proposed plan to repeal net neutrality protections would put a huge burden on microbusinesses like mine. As an Etsy seller, net neutrality is essential to the success of my business and my ability to care for myself and my family. The FCC needs to ensure equal opportunities for microbusinesses to compete with larger and more established brands by upholding net neutrality protections. Etsy has opened the door for me and 1.8 million other sellers to turn our passion into a business by connecting us to a global market of buyers. For 32% of creative entrepreneurs on the platform, our creative business is our sole occupation. A decrease in sales in the internet slow lane or higher cost to participate in Chairman Paiâ€™s pay-to-play environment would create significant obstacles for me and other Etsy sellers to care for ourselves and our families. Moreover, 87% of Etsy sellers in the U.S. are women, and most run their microbusinesses out of their homes. By rolling back the bright line rules that ensure net neutrality, Chairman Pai is not only taking away our livelihood, he is also putting up barriers to entrepreneurship for a whole cohort of Americans. My business growth depends on equal access to consumers. Any rule that allows broadband providers to negotiate special deals with some companies would undermine my ability to compete online. We need a free and open internet that works for everyone, not just telecom companies that stand to benefit from the FCCâ€™s proposed rules. I'm sending this to the FCC's open proceeding and to my members of Congress. Please publicly support the FCC's existing net neutrality rules based on Title II and microbusinesses like mine. Thank you! Kim Carr	
+
+### ID 4 (54 entires)
+
+This is a letter-writing campaign against the proposal
+
+> ...The FCC should throw out Chairman Ajit Pai's proposal to give the ISP monopolies like Comcast, AT&T, and Verizon the authority to create Internet fast lanes, stripping Internet users of the meaningful access and privacy protections we fought for and just recently won....
+
+This language was pretty unique for this group of comments.
+
+### ID 5 (5 entires)
+
+This is a letter-writing campaign against the proposal
+
+> The FCC Open Internet Rules (net neutrality rules) are extremely important to me. I urge you to protect them. I don't want ISPs to have the power to block websites, slow them down, make some more accessible than others, or split the Internet into "fast lanes" for companies that pay and "slow lanes" for the rest.
+
+### ID 6 (111 entires)
+
+This is a letter-writing campaign that is very similar to ID 5, but significantly different
+
+> The FCC's Open Internet Rules (net neutrality rules) are extremely important to me. I urge you to protect them. I don't want ISPs to have the power to block websites, slow them down, give some sites an advantage over others, or split the Internet into "fast lanes" for companies that pay and "slow lanes" for the rest. Now is not the time to let giant ISPs censor what we see and do online. Censorship by ISPs is a serious problem. Comcast has throttled Netflix, AT&T blocked FaceTime, Time Warner Cable throttled the popular game League of Legends, and Verizon admitted it will introduce fast lanes for sites that pay-and slow lanes for everyone else-if the FCC lifts the rules. This hurts consumers and businesses large and small. Courts have made clear that if the FCC ends Title II classification, the FCC must let ISPs offer "fast lanes" to websites for a fee. Chairman Pai has made clear that he intends to do exactly this. But if some companies can pay our ISPs to have their content load faster, startups and small businesses that can't pay those fees won't be able to compete. You will kill the open marketplace that has enabled millions of small businesses and created the 5 most valuable companies in America-just to further enrich a few much less valuable cable giants famous for sky-high prices and abysmal customer service. Internet providers will be able to impose a private tax on every sector of the American economy. Moreover, under Chairman Pai's plan, ISPs will be able to make it more difficult to access political speech that they don't like. They'll be able to charge fees for website delivery that would make it harder for blogs, nonprofits, artists, and others who can't pay up to have their voices heard. I'm sending this to the FCC's open proceeding, but I worry that Chairman Pai, a former Verizon lawyer, has made his plans and will ignore me and millions of other Americans. So I'm also sending this to my members of Congress. Please publicly support the FCC's existing net neutrality rules based on Title II, and denounce Chairman Pai's plans. Do whatever you can to dissuade him. Thank you! Linda Karpell
+
+### ID 7 (164 entires)
+
+This is a letter writing campaign that is identical to ID 6. I'm not sure why HDBSCAN grouped these as separate clusters. 
+
+> The FCC's Open Internet Rules (net neutrality rules) are extremely important to me. I urge you to protect them.\n\nI don't want ISPs to have the power to block websites, slow them down, give some sites an advantage over others, or split the Internet into "fast lanes" for companies that pay and "slow lanes" for the rest.\n\nNow is not the time to let giant ISPs censor what we see and do online.\n\nCensorship by ISPs is a serious problem. Comcast has throttled Netflix, AT&T blocked FaceTime, Time Warner Cable throttled the popular game League of Legends, and Verizon admitted it will introduce fast lanes for sites that pay-and slow lanes for everyone else-if the FCC lifts the rules. This hurts consumers and businesses large and small.\n\nCourts have made clear that if the FCC ends Title II classification, the FCC must let ISPs offer "fast lanes" to websites for a fee.\n\nChairman Pai has made clear that he intends to do exactly this.\n\nBut if some companies can pay our ISPs to have their content load faster, startups and small businesses that can't pay those fees won't be able to compete. You will kill the open marketplace that has enabled millions of small businesses and created the 5 most valuable companies in America-just to further enrich a few much less valuable cable giants famous for sky-high prices and abysmal customer service.\n\nInternet providers will be able to impose a private tax on every sector of the American economy.\n\nMoreover, under Chairman Pai's plan, ISPs will be able to make it more difficult to access political speech that they don't like. They'll be able to charge fees for website delivery that would make it harder for blogs, nonprofits, artists, and others who can't pay up to have their voices heard.\n\nI'm sending this to the FCC's open proceeding, but I worry that Chairman Pai, a former Verizon lawyer, has made his plans and will ignore me and millions of other Americans.\n\nSo I'm also sending this to my members of Congress. Please publicly support the FCC's existing net neutrality rules based on Title II, and denounce Chairman Pai's plans. Do whatever you can to dissuade him.\n\nThank you!\r\nPhillip T Anderson	
+
+## The worse results
+
+I also qualitatively compared results from trigram measured by TF-IDF 
+
+Each cluster corresponds to a letter writing campaign, but I found that this method failed to cluster the madlib astroturf comments that were so similar syntactically, but used different terms. For example docid 2240264 was specificed as unclustered. 
+
+> Dear Mr. Pai, My comments re: network neutrality regulations. I would like to recommend Ajit Pai to reverse The Obama/Wheeler decision to take over the web. People like me, as opposed to Washington bureaucrats, should be empowered to buy which applications they desire. The Obama/Wheeler decision to take over the web is a distortion of net neutrality. It ended a hands-off system that functioned exceptionally smoothly for decades with Republican and Democrat backing.	

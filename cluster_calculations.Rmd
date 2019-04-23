@@ -42,7 +42,6 @@ library(tidyverse)
 library(stringi)
 library(tokenizers)
 library(dbscan)
-library(Rtsne)
 library(udpipe)
 ```
 
@@ -140,12 +139,11 @@ calcClusters <- function(df, model, minPts=5) {
     # Returns:
     #   A dataframe 
     fn <- file.path(data.dir, paste0('clusters_', model, '.csv'))
-    docids <- df$docids
-    X <- df %>% select(-docid)
     if (!file.exists(fn)) {
+        X <- df %>% select(-docid)
         cl <- hdbscan(X, minPts=minPts)
         point_data <- data.frame(
-            docid=docids,
+            docid=df$docid,
             cluster=cl$cluster,
             membership_prob=cl$membership_prob,
             outlier_scores=cl$outlier_scores)
@@ -162,14 +160,22 @@ calcClusters <- function(df, model, minPts=5) {
 The first approach will be to vectorize documents by term frequency from unigrams, bigrams, and trigrams. We'll also exclude any ngrams that have a term frequency of less than or equal to 0.05, which is the default parameter to `calcNgramTbl`. With a document-ngram matrix calculated for each of the three ngrams, let's run HDBSCAN on each matrix and store the results. Completing the code chunk below can take a while.
 
 ```{r}
-word.tf <- lapply(1:3, function(i) {
-  calcNgramTbl(comments, n=i)
-})
-
-for (i in 1:3) {
+# TODO save as R data
+lapply(1:3, function(i) {
+  word.tf <- calcNgramTbl(comments, n=i)
   calcClusters(word.tf, paste('word', i, 'tf', sep='_'))
-  print(paste('Finished iteration', i))
-}
+  paste('Finished iteration', i)
+})
+```
+
+## Vectorize by term frequency inverse document frequency
+
+```{r}
+lapply(1:3, function(i) {
+  word.tf <- calcNgramTbl(comments, n=i, measure='tf_idf')
+  calcClusters(word.tf, paste('word', i, 'tfidf', sep='_'))
+  paste('Finished iteration', i)
+})
 ```
 
 ## Vectorize by part of speech ngrams
@@ -211,7 +217,9 @@ pos.tf <- lapply(1:5, function(i) {
   }
   return(df)
 })
+```
 
+```{r}
 for (i in 1:5) {
   calcClusters(pos.tf[[i]], paste('pos', i, 'tf', sep='_'))
   print(paste('Finished iteration', i))
@@ -223,6 +231,10 @@ for (i in 1:5) {
 Daks & Clark (2017) proposed an unsupervised approach for clustering documents by author based on syntactic structure. Their framework specifies a term document matrix comprised of 3, 4, and 5-grams in part-of-speech translated documents and weighted by TF-IDF. I'll also use the 0.05 threshold.
 
 ```{r}
-dc_dtm <- calcNgramTbl(pos_seqs, n_min=3, n=5)
-calcClusters(dc_dtm, 'daks_clark')
+dc.dtm <- calcNgramTbl(pos_seqs, n_min=3, n=5, measure = 'tf_idf')
+calcClusters(dc.dtm, 'daks_clark')
+```
+
+```{r}
+cat('Vectorizing by the Daks & Clark method produced a document-term matrix of', ncol(dc.dtm) ,'dimensions')
 ```
